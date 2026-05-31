@@ -238,6 +238,29 @@ export async function initDatabase(db) {
   }
 }
 
+export async function cleanupStaleSettings(db) {
+  try {
+    const stalePrefixes = ['last_write_%'];
+    const staleExact = [
+      'last_aggregated_to_120',
+      'last_aggregated_to_240',
+      'last_aggregated_to_480',
+      'last_aggregated_to_960',
+      'last_aggregated_to_1920'
+    ];
+    const staleKeysWhere = stalePrefixes.map(() => `key LIKE ?`).concat(staleExact.map(() => `key = ?`)).join(' OR ');
+    const staleBindings = [...stalePrefixes, ...staleExact];
+    const { meta: cleanupResult } = await db.prepare(
+      `DELETE FROM settings WHERE ${staleKeysWhere}`
+    ).bind(...staleBindings).run();
+    if (cleanupResult.changes > 0) {
+      console.log(`已清理 ${cleanupResult.changes} 个废弃的 settings key`);
+    }
+  } catch (e) {
+    console.error('清理废弃 settings key 失败:', e);
+  }
+}
+
 const AGGREGATE_PHASES = [
   {
     name: '30分钟-1小时(2分钟桶)',
@@ -634,13 +657,13 @@ async function getLastAggregatedTo(db) {
   return null;
 }
 
-export async function getMetricsHistory(db, serverId, hours, columns) {
+export async function getMetricsHistory(db, serverId, hours, columns, enableLongRetention = false) {
   const now = Date.now();
   const cutoff = now - hours * 60 * 60 * 1000;
 
   const aggColumns = mapColumnsToAggregated(columns);
 
-  const lastAggregatedTo = await getLastAggregatedTo(db);
+  const lastAggregatedTo = enableLongRetention ? await getLastAggregatedTo(db) : null;
 
   const rawCutoff = lastAggregatedTo || (now - 30 * 60 * 1000);
 
@@ -674,43 +697,45 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
 
   console.log(`[History] RAW: ${rawResult.results.length}`);
 
-  for (const phase of AGGREGATE_PHASES) {
-    const phaseStart = now - phase.maxHours * 3600 * 1000;
-    const phaseEnd = now - phase.minHours * 3600 * 1000;
+  if (enableLongRetention) {
+    for (const phase of AGGREGATE_PHASES) {
+      const phaseStart = now - phase.maxHours * 3600 * 1000;
+      const phaseEnd = now - phase.minHours * 3600 * 1000;
 
-    const queryStart = Math.max(cutoff, phaseStart);
-    const queryEnd = Math.min(phaseEnd, rawCutoff);
+      const queryStart = Math.max(cutoff, phaseStart);
+      const queryEnd = Math.min(phaseEnd, rawCutoff);
 
-    if (queryStart >= queryEnd) continue;
+      if (queryStart >= queryEnd) continue;
 
-    const aggResult = await db.prepare(`
-      SELECT 
-        bucket AS timestamp,
-        ${aggColumns}
-      FROM metrics_aggregated
-      WHERE server_id = ?
-        AND bucket_size = ?
-        AND bucket >= ?
-        AND bucket < ?
-    `).bind(
-      serverId,
-      phase.bucketSeconds,
-      queryStart,
-      queryEnd
-    ).all();
+      const aggResult = await db.prepare(`
+        SELECT 
+          bucket AS timestamp,
+          ${aggColumns}
+        FROM metrics_aggregated
+        WHERE server_id = ?
+          AND bucket_size = ?
+          AND bucket >= ?
+          AND bucket < ?
+      `).bind(
+        serverId,
+        phase.bucketSeconds,
+        queryStart,
+        queryEnd
+      ).all();
 
-    for (const row of aggResult.results) {
-      const ts = Number(row.timestamp);
+      for (const row of aggResult.results) {
+        const ts = Number(row.timestamp);
 
-      if (!map.has(ts)) {
-        map.set(ts, {
-          ...row,
-          timestamp: ts
-        });
+        if (!map.has(ts)) {
+          map.set(ts, {
+            ...row,
+            timestamp: ts
+          });
+        }
       }
-    }
 
-    console.log(`[History] ${phase.name}: ${aggResult.results.length}`);
+      console.log(`[History] ${phase.name}: ${aggResult.results.length}`);
+    }
   }
 
   const result = Array.from(map.values());
@@ -721,7 +746,11 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
   return result;
 }
 
-export async function getAggregatedHistory(db, serverId, hours, columns) {
+export async function getAggregatedHistory(db, serverId, hours, columns, enableLongRetention = false) {
+  if (!enableLongRetention) {
+    return [];
+  }
+
   const now = Date.now();
   const oneHourMs = 60 * 60 * 1000;
 

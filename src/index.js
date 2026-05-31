@@ -1,4 +1,4 @@
-import { initDatabase, cleanupOldData, getMetricsHistory, getAggregatedHistory } from './database/schema.js';
+import { initDatabase, cleanupOldData, cleanupStaleSettings, getMetricsHistory, getAggregatedHistory } from './database/schema.js';
 import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate } from './handlers/update.js';
@@ -40,7 +40,7 @@ async function fetchHistoryData(env, request, id, hours, columns) {
     });
   }
   
-  const data = await getMetricsHistory(env.DB, id, clampedHours, columns);
+  const data = await getMetricsHistory(env.DB, id, clampedHours, columns, enableLongRetention);
   
   historyCache.set(cacheKey, {
     timestamp: Date.now(),
@@ -81,7 +81,7 @@ async function fetchAggregatedHistoryData(env, request, id, hours, columns) {
     });
   }
   
-  const data = await getAggregatedHistory(env.DB, id, clampedHours, columns);
+  const data = await getAggregatedHistory(env.DB, id, clampedHours, columns, enableLongRetention);
   
   historyCache.set(cacheKey, {
     timestamp: Date.now(),
@@ -182,6 +182,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     await initDatabase(env.DB);
+    await cleanupStaleSettings(env.DB); // 清理已废弃的 settings key
     
     console.log('[Cron] 开始执行定时清理任务');
     const enableLongRetention = env.LONG_RETENTION === 'true';
