@@ -1,6 +1,6 @@
 import { checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { clearNotificationSettingsCache } from '../services/notification.js';
-import { getLatestMetricsForAllServers, getAllServers } from '../database/schema.js';
+import { getLatestMetricsForAllServers, getAllServers, createCommand, getCommandHistory, getPendingCommandsCount, cancelPendingCommands } from '../database/schema.js';
 import { clearServersListCache, clearServerDetailCache } from '../utils/cache.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 
@@ -440,6 +440,66 @@ export async function handleAdminAPI(request, env, sys) {
         message: {
           en: `${ids.length} server(s) deleted`,
           zh: `已删除 ${ids.length} 台服务器`
+        }
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    else if (data.action === 'send_command') {
+      const { server_id, command, timeout } = data;
+      if (!server_id || !command) {
+        return new Response(JSON.stringify({ error: 'Missing server_id or command' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      const cmdTimeout = Math.min(Math.max(parseInt(timeout) || 30, 1), 300);
+      const cmdId = await createCommand(env.DB, server_id, command, cmdTimeout);
+      return new Response(JSON.stringify({
+        success: true,
+        command_id: cmdId,
+        message: {
+          en: 'Command sent to server',
+          zh: '命令已发送到服务器'
+        }
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    else if (data.action === 'list_commands') {
+      const { server_id, limit } = data;
+      if (!server_id) {
+        return new Response(JSON.stringify({ error: 'Missing server_id' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      const commands = await getCommandHistory(env.DB, server_id, parseInt(limit) || 50);
+      const pendingCount = await getPendingCommandsCount(env.DB, server_id);
+      return new Response(JSON.stringify({
+        success: true,
+        commands,
+        pending_count: pendingCount
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    else if (data.action === 'cancel_commands') {
+      const { server_id } = data;
+      if (!server_id) {
+        return new Response(JSON.stringify({ error: 'Missing server_id' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      const cancelled = await cancelPendingCommands(env.DB, server_id);
+      return new Response(JSON.stringify({
+        success: true,
+        cancelled,
+        message: {
+          en: `${cancelled} pending command(s) cancelled`,
+          zh: `已取消 ${cancelled} 条待执行命令`
         }
       }), {
         headers: { 'Content-Type': 'application/json' }

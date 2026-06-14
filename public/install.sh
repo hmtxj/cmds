@@ -360,6 +360,52 @@ PREV_LOOP_TIME=$(date +%s)
 
 echo "[INFO] CF-Server-Monitor Probe Engine Started Successfully."
 
+# 命令执行超时（秒）
+CMD_TIMEOUT="${11:-30}"
+
+# ------------------ 命令拉取与执行模块 ------------------
+run_pending_commands() {
+    local base="${WORKER_URL%%/update}"
+    [ "$base" = "$WORKER_URL" ] && base="${WORKER_URL}"
+    local poll_url="${base}/api/command/poll"
+    local report_url="${base}/api/command/report"
+    
+    local poll_payload="{\"id\":\"$SERVER_ID\",\"secret\":\"$SECRET\"}"
+    local poll_result
+    poll_result=$(curl -s -X POST -H "Content-Type: application/json" -d "$poll_payload" -m 4 --connect-timeout 2 "$poll_url" 2>/dev/null || echo '{"count":0}')
+    
+    local count
+    count=$(echo "$poll_result" | sed 's/.*"count":\([0-9]*\).*/\1/' 2>/dev/null || echo "0")
+    [ -z "$count" ] || [ "$count" -eq 0 ] 2>/dev/null && return
+    
+    # 用 awk 解析命令列表
+    echo "$poll_result" | awk '
+    BEGIN { RS="}"; FS="," }
+    /"id"/ {
+        id = ""; cmd = ""
+        for(i=1;i<=NF;i++) {
+            if($i ~ /"id"/) { gsub(/[^0-9]/,"",$i); id = $i }
+            if($i ~ /"command"/) {
+                sub(/.*"command":"/,"",$i)
+                sub(/"[^"]*$/,"",$i)
+                gsub(/\\"/,"\"",$i)
+                cmd = $i
+            }
+        }
+        if(id != "" && cmd != "") {
+            print id
+            print cmd
+        }
+    }' | while read -r CMD_ID && read -r CMD_TEXT; do
+        output=""
+        exit_code=0
+        output=$(timeout "$CMD_TIMEOUT" bash -c "$CMD_TEXT" 2>&1) || exit_code=$?
+        escaped_output=$(echo "$output" | sed 's/"/\\"/g' | tr '\n' ' ')
+        report_payload="{\"id\":\"$SERVER_ID\",\"secret\":\"$SECRET\",\"command_id\":$CMD_ID,\"output\":\"$escaped_output\",\"exit_code\":$exit_code}"
+        curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$report_payload" -m 4 --connect-timeout 2 "$report_url" 2>/dev/null || true
+    done
+}
+
 # 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker 协程，无 wait 干扰
 run_network_worker &
 
@@ -511,6 +557,9 @@ EOF
 )
     # 上报上游数据端 (限定 4s 超时控制，主循环绝不严重漂移)
     curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$PAYLOAD" -m 4 --connect-timeout 2 "$WORKER_URL" 2>/dev/null || true
+
+    # 检查是否有待执行的命令
+    run_pending_commands
     
     # 动态补偿机制：减去指标采集耗时，保证平稳的上报频率
     LOOP_END_TIME=$(date +%s)
@@ -560,7 +609,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash "${SCRIPT_FILE}" "${esc_id}" "${esc_sec}" "${esc_url}" "${REPORT_INTERVAL}" "${esc_ping}" "${esc_ct}" "${esc_cu}" "${esc_cm}" "${esc_bd}" "${esc_reset_day}"
+ExecStart=/bin/bash "${SCRIPT_FILE}" "${esc_id}" "${esc_sec}" "${esc_url}" "${REPORT_INTERVAL}" "${esc_ping}" "${esc_ct}" "${esc_cu}" "${esc_cm}" "${esc_bd}" "${esc_reset_day}" "30"
 Restart=always
 RestartSec=5
 User=root

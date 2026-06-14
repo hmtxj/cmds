@@ -23,7 +23,10 @@ export async function updateDatabase(db) {
     
     const dropAggregated = await dropMetricsAggregatedTable(db);
     results.push({ name: '删除弃用的 metrics_aggregated 表', ...dropAggregated });
-    
+
+    const addCommands = await addCommandsTable(db);
+    results.push({ name: '添加 server_commands 表', ...addCommands });
+
     console.log('✅ 数据库更新完成');
     
     return {
@@ -279,6 +282,43 @@ async function dropMetricsAggregatedTable(db) {
     return { success: true, dropped: 1, message: '已删除 metrics_aggregated 表' };
   } catch (e) {
     console.error('删除 metrics_aggregated 表失败:', e);
+    return { success: false, error: e.message };
+  }
+}
+
+async function addCommandsTable(db) {
+  try {
+    const { results: tables } = await db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='server_commands'`
+    ).all();
+
+    if (tables.length > 0) {
+      return { success: true, added: 0, message: '表已存在，无需创建' };
+    }
+
+    await db.prepare(`
+      CREATE TABLE server_commands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        output TEXT DEFAULT '',
+        exit_code INTEGER DEFAULT -1,
+        created_at INTEGER DEFAULT 0,
+        started_at INTEGER DEFAULT 0,
+        completed_at INTEGER DEFAULT 0,
+        timeout INTEGER DEFAULT 30
+      )
+    `).run();
+
+    await db.prepare(`
+      CREATE INDEX idx_commands_server_status
+      ON server_commands(server_id, status)
+    `).run();
+
+    return { success: true, added: 1, message: 'server_commands 表创建成功' };
+  } catch (e) {
+    console.error('创建 server_commands 表失败:', e);
     return { success: false, error: e.message };
   }
 }

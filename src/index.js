@@ -1,4 +1,4 @@
-import { initDatabase, cleanupOldData, getMetricsHistory, rebuildDatabase } from './database/schema.js';
+import { initDatabase, cleanupOldData, getMetricsHistory, rebuildDatabase, getPendingCommands, claimCommand, completeCommand } from './database/schema.js';
 import { checkOfflineNodes } from './services/notification.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import { handleAdminAPI } from './handlers/admin.js';
@@ -148,6 +148,8 @@ export default {
       '/update',
       '/admin/api',
       '/api/config',
+      '/api/command/poll',
+      '/api/command/report',
       '/favicon.ico',
       '/logo.svg',
       '/install.sh'
@@ -267,6 +269,28 @@ export default {
       { method: 'POST', path: '/admin/api', handler: async () => {
         await ensureFullSettings();
         return handleAdminAPI(request, env, sys);
+      }},
+
+      // === Command Execution API ===
+      // Agent polls for pending commands (authenticated by server_id + secret)
+      { method: 'POST', path: '/api/command/poll', handler: async () => {
+        const data = await request.json();
+        const { id, secret } = data;
+        if (secret !== env.API_SECRET) {
+          return createUnauthorizedResponse('Invalid secret');
+        }
+        const commands = await getPendingCommands(env.DB, id);
+        return createSuccessResponse({ commands, count: commands.length });
+      }},
+      // Agent reports command execution result
+      { method: 'POST', path: '/api/command/report', handler: async () => {
+        const data = await request.json();
+        const { id, secret, command_id, output, exit_code } = data;
+        if (secret !== env.API_SECRET) {
+          return createUnauthorizedResponse('Invalid secret');
+        }
+        await completeCommand(env.DB, command_id, output, exit_code);
+        return createSuccessResponse({ success: true });
       }},
       { method: 'GET', path: '/updateDatabase', handler: async () => {
         await ensureSiteSettings();

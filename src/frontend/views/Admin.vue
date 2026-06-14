@@ -81,6 +81,11 @@
             :class="{ active: activeTab === 'database' }"
             @click="activeTab = 'database'"
           >▸ {{ trans.dbManagement }}</button>
+          <button 
+            class="tab-btn" 
+            :class="{ active: activeTab === 'commands' }"
+            @click="activeTab = 'commands'; loadCommandsForAll()"
+          >▸ {{ trans.commands }}</button>
         </div>
 
         <div id="tab-servers" class="tab-content" :class="{ active: activeTab === 'servers' }">
@@ -398,6 +403,52 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div id="tab-commands" class="tab-content" :class="{ active: activeTab === 'commands' }">
+        <div class="alert alert-info">
+          <span class="alert-icon">[i]</span>
+          <span>{{ trans.cmdTip }}</span>
+        </div>
+
+        <div class="toolbar">
+          <select v-model="cmdServerId" class="toolbar-select" style="max-width:200px;">
+            <option value="" disabled>{{ trans.hostname }}</option>
+            <option v-for="s in servers" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <input type="text" v-model="cmdText" class="toolbar-input flex-1" :placeholder="trans.commandPlaceholder">
+          <input type="number" v-model="cmdTimeout" class="toolbar-input" style="width:80px;" placeholder="30" min="1" max="300">
+          <button @click="sendCommand" class="btn btn-primary" :disabled="!cmdServerId || !cmdText">⚡ {{ trans.execute }}</button>
+          <button @click="cancelCommands" class="btn btn-red" :disabled="!cmdServerId">✕ {{ trans.cancelCommands }}</button>
+        </div>
+
+        <div class="table-wrapper">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>{{ trans.hostname.toUpperCase() }}</th>
+                <th>{{ trans.commandResult.toUpperCase() }}</th>
+                <th style="min-width:200px;">{{ trans.commandOutput.toUpperCase() }}</th>
+                <th>{{ trans.commandStatus.toUpperCase() }}</th>
+                <th>{{ trans.commandSentAt.toUpperCase() }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="commands.length === 0">
+                <td colspan="5" class="empty-state"><span class="empty-icon">📦</span> {{ trans.noCommands }}</td>
+              </tr>
+              <tr v-for="cmd in commands" :key="cmd.id">
+                <td>{{ getServerName(cmd.server_id) }}</td>
+                <td><code class="cmd-code">{{ cmd.command }}</code></td>
+                <td><pre class="cmd-output">{{ cmd.output || '-' }}</pre></td>
+                <td>
+                  <span :style="{ color: cmdStatusColor(cmd.status) }" class="font-bold">{{ cmdStatusText(cmd.status) }}</span>
+                </td>
+                <td class="text-sm">{{ formatTime(cmd.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -769,6 +820,13 @@ const customCm = ref('')
 const customBd = ref('')
 const resetDay = ref(1)
 const copiedCmd = ref(false)
+
+// Command execution
+const cmdServerId = ref('')
+const cmdText = ref('')
+const cmdTimeout = ref(30)
+const commands = ref([])
+const cmdLoading = ref(false)
 
 const handleLogin = async () => {
     loginError.value = ''
@@ -1265,6 +1323,96 @@ const getStatusText = (server) => {
       settings.value.custom_bg = event.target.result
     }
     reader.readAsDataURL(file)
+  }
+
+  // ============ Command Execution ============
+  const getServerName = (id) => {
+    const s = servers.value.find(x => x.id === id)
+    return s ? s.name : id
+  }
+
+  const cmdStatusColor = (status) => {
+    const map = { pending: 'var(--accent-yellow)', running: '#4fc3f7', completed: 'var(--accent-green)', failed: 'var(--accent-red)', cancelled: '#888' }
+    return map[status] || '#888'
+  }
+
+  const cmdStatusText = (status) => {
+    const map = { pending: trans.value.cmdPending, running: trans.value.cmdRunning, completed: trans.value.cmdCompleted, failed: trans.value.cmdFailed, cancelled: trans.value.cmdCancelled }
+    return map[status] || status
+  }
+
+  const formatTime = (ts) => {
+    if (!ts || ts === 0) return '-'
+    return new Date(parseInt(ts)).toLocaleString()
+  }
+
+  const sendCommand = async () => {
+    if (!cmdServerId.value || !cmdText.value) return
+    cmdLoading.value = true
+    try {
+      const res = await adminApi({
+        action: 'send_command',
+        server_id: cmdServerId.value,
+        command: cmdText.value,
+        timeout: parseInt(cmdTimeout.value) || 30
+      })
+      if (res.ok) {
+        alert(trans.value.commandSent)
+        cmdText.value = ''
+        loadCommands(cmdServerId.value)
+      } else {
+        const data = await res.json()
+        alert(data.error || trans.value.cmdError)
+      }
+    } catch (e) {
+      alert(trans.value.cmdError + ': ' + e.message)
+    } finally {
+      cmdLoading.value = false
+    }
+  }
+
+  const loadCommands = async (serverId) => {
+    try {
+      const res = await adminApi({ action: 'list_commands', server_id: serverId, limit: 50 })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.commands) {
+          commands.value = data.commands
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load commands:', e)
+    }
+  }
+
+  const loadCommandsForAll = async () => {
+    if (servers.value.length === 0) return
+    const allCmds = []
+    for (const s of servers.value) {
+      try {
+        const res = await adminApi({ action: 'list_commands', server_id: s.id, limit: 20 })
+        if (res.ok) {
+          const data = await res.json()
+          if (data.commands) {
+            allCmds.push(...data.commands)
+          }
+        }
+      } catch (e) { /* skip */ }
+    }
+    allCmds.sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+    commands.value = allCmds.slice(0, 50)
+  }
+
+  const cancelCommands = async () => {
+    if (!cmdServerId.value) return
+    try {
+      const res = await adminApi({ action: 'cancel_commands', server_id: cmdServerId.value })
+      if (res.ok) {
+        loadCommands(cmdServerId.value)
+      }
+    } catch (e) {
+      console.error('Failed to cancel commands:', e)
+    }
   }
 
 const handleUpgradeDatabase = async () => {

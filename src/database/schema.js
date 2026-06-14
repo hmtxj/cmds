@@ -91,6 +91,26 @@ export async function initDatabase(db) {
       ON metrics_history(server_id, timestamp)
     `).run();
 
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS server_commands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        output TEXT DEFAULT '',
+        exit_code INTEGER DEFAULT -1,
+        created_at INTEGER DEFAULT 0,
+        started_at INTEGER DEFAULT 0,
+        completed_at INTEGER DEFAULT 0,
+        timeout INTEGER DEFAULT 30
+      )
+    `).run();
+
+    await db.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_commands_server_status
+      ON server_commands(server_id, status)
+    `).run();
+
     console.log('✅ 数据库初始化完成');
     dbInitialized = true;
   } catch (e) {
@@ -110,7 +130,10 @@ export async function rebuildDatabase(db) {
     
     await db.prepare(`DROP TABLE IF EXISTS settings`).run();
     console.log('✅ 已删除 settings 表');
-    
+
+    await db.prepare(`DROP TABLE IF EXISTS server_commands`).run();
+    console.log('✅ 已删除 server_commands 表');
+
     dbInitialized = false;
     
     await initDatabase(db);
@@ -353,6 +376,71 @@ export async function getLatestMetricsForAllServers(db) {
     const cacheInfo = getLatestMetricsCache();
     return cacheInfo.cache || new Map();
   }
+}
+
+export async function createCommand(db, serverId, command, timeout = 30) {
+  const now = Date.now();
+  const { meta } = await db.prepare(`
+    INSERT INTO server_commands (server_id, command, status, created_at, timeout)
+    VALUES (?, ?, 'pending', ?, ?)
+  `).bind(serverId, command, now, timeout).run();
+  return meta.last_row_id;
+}
+
+export async function getPendingCommands(db, serverId) {
+  const { results } = await db.prepare(`
+    SELECT * FROM server_commands
+    WHERE server_id = ? AND status = 'pending'
+    ORDER BY created_at ASC
+    LIMIT 10
+  `).bind(serverId).all();
+  return results;
+}
+
+export async function claimCommand(db, commandId) {
+  const now = Date.now();
+  const { meta } = await db.prepare(`
+    UPDATE server_commands SET status = 'running', started_at = ?
+    WHERE id = ? AND status = 'pending'
+  `).bind(now, commandId).run();
+  return meta.changes > 0;
+}
+
+export async function completeCommand(db, commandId, output, exitCode) {
+  const now = Date.now();
+  const status = exitCode === 0 ? 'completed' : 'failed';
+  await db.prepare(`
+    UPDATE server_commands
+    SET status = ?, output = ?, exit_code = ?, completed_at = ?
+    WHERE id = ?
+  `).bind(status, output, exitCode, now, commandId).run();
+}
+
+export async function getCommandHistory(db, serverId, limit = 50) {
+  const { results } = await db.prepare(`
+    SELECT * FROM server_commands
+    WHERE server_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).bind(serverId, limit).all();
+  return results;
+}
+
+export async function getPendingCommandsCount(db, serverId) {
+  const row = await db.prepare(`
+    SELECT COUNT(*) as count FROM server_commands
+    WHERE server_id = ? AND status = 'pending'
+  `).bind(serverId).first();
+  return row ? row.count : 0;
+}
+
+export async function cancelPendingCommands(db, serverId) {
+  const now = Date.now();
+  const { meta } = await db.prepare(`
+    UPDATE server_commands SET status = 'cancelled', completed_at = ?
+    WHERE server_id = ? AND status = 'pending'
+  `).bind(now, serverId).run();
+  return meta.changes || 0;
 }
 
 export { getAllServers };
