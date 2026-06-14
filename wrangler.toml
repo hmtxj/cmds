@@ -21,18 +21,7 @@ API_SECRET = ""
 [[d1_databases]]
 binding = "DB"
 database_name = "server-monitor-db"
-
-# Durable Objects：实时指标广播中心
-# 注意：首次部署前需要执行 `wrangler durable-object create MetricsBroadcaster --class MetricsBroadcaster`
-# 或者在部署后，wrangler 会自动创建对应的 DO namespace。
-[[durable_objects.bindings]]
-name = "METRICS_BROADCASTER"
-class_name = "MetricsBroadcaster"
-script_name = "cf-server-monitor"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["MetricsBroadcaster"]
+database_id = ""
 
 # 开发服务器配置
 [dev]
