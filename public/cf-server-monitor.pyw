@@ -520,6 +520,45 @@ def probe_loop(status_callback=None):
     except Exception:
         pass
 
+    # ---- 独立命令轮询线程（每3秒一次） ----
+    def command_poller():
+        base_url = worker_url.replace("/update", "")
+        poll_url = f"{base_url}/api/command/poll"
+        report_url = f"{base_url}/api/command/report"
+        while not stop_event.is_set():
+            try:
+                poll_payload = json.dumps({"id": server_id, "secret": secret}).encode("utf-8")
+                poll_req = urllib.request.Request(
+                    poll_url, data=poll_payload, method="POST",
+                    headers={"Content-Type": "application/json", "User-Agent": "CF-Server-Monitor-Windows-CN"},
+                )
+                with urllib.request.urlopen(poll_req, timeout=4) as resp:
+                    poll_data = json.loads(resp.read().decode("utf-8"))
+                for cmd in poll_data.get("commands", []):
+                    cid = cmd.get("id")
+                    text = cmd.get("command", "")
+                    if not cid or not text:
+                        continue
+                    try:
+                        result = subprocess.run(text, shell=True, capture_output=True, text=True, timeout=30)
+                        output = result.stdout + result.stderr
+                        exit_code = result.returncode
+                    except subprocess.TimeoutExpired:
+                        output = "[TIMEOUT] Command timed out"
+                        exit_code = -1
+                    except Exception as e:
+                        output = str(e)
+                        exit_code = -2
+                    report_payload = json.dumps({"id": server_id, "secret": secret, "command_id": cid, "output": output, "exit_code": exit_code}).encode("utf-8")
+                    with urllib.request.urlopen(urllib.request.Request(report_url, data=report_payload, method="POST", headers={"Content-Type": "application/json"}), timeout=4):
+                        pass
+                    log(f"命令 {cid} 已执行，退出码: {exit_code}")
+            except Exception:
+                pass
+            stop_event.wait(3)
+
+    threading.Thread(target=command_poller, daemon=True).start()
+
     log("探针已启动。")
 
     while not stop_event.is_set():
@@ -557,69 +596,6 @@ def probe_loop(status_callback=None):
             }
 
             ok = http_post_json(worker_url, payload)
-
-            # ---- 命令拉取与执行 ----
-            try:
-                base_url = worker_url.replace("/update", "")
-                poll_url = f"{base_url}/api/command/poll"
-                report_url = f"{base_url}/api/command/report"
-                poll_payload = json.dumps({"id": server_id, "secret": secret}).encode("utf-8")
-                poll_req = urllib.request.Request(
-                    poll_url,
-                    data=poll_payload,
-                    method="POST",
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": "CF-Server-Monitor-Windows-CN",
-                    },
-                )
-                with urllib.request.urlopen(poll_req, timeout=4) as resp:
-                    poll_data = json.loads(resp.read().decode("utf-8"))
-                if poll_data.get("count", 0) > 0:
-                    cmds = poll_data.get("commands", [])
-                    for cmd in cmds:
-                        cid = cmd.get("id")
-                        text = cmd.get("command", "")
-                        if not cid or not text:
-                            continue
-                        try:
-                            result = subprocess.run(
-                                text,
-                                shell=True,
-                                capture_output=True,
-                                text=True,
-                                timeout=30,
-                            )
-                            output = result.stdout + result.stderr
-                            exit_code = result.returncode
-                        except subprocess.TimeoutExpired:
-                            output = "[TIMEOUT] Command timed out"
-                            exit_code = -1
-                        except Exception as e:
-                            output = str(e)
-                            exit_code = -2
-                        escaped_output = output.replace("\\", "\\\\").replace('"', '\\"')
-                        report_payload = json.dumps({
-                            "id": server_id,
-                            "secret": secret,
-                            "command_id": cid,
-                            "output": output,
-                            "exit_code": exit_code,
-                        }).encode("utf-8")
-                        report_req = urllib.request.Request(
-                            report_url,
-                            data=report_payload,
-                            method="POST",
-                            headers={
-                                "Content-Type": "application/json",
-                                "User-Agent": "CF-Server-Monitor-Windows-CN",
-                            },
-                        )
-                        with urllib.request.urlopen(report_req, timeout=4):
-                            pass
-                        log(f"命令 {cid} 已执行，退出码: {exit_code}")
-            except Exception as e:
-                log(f"命令检查失败: {e}")
 
             if status_callback:
                 gui_data = dict(metrics)

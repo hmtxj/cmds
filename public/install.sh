@@ -406,8 +406,18 @@ run_pending_commands() {
     done
 }
 
-# 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker 协程，无 wait 干扰
+# 常驻命令轮询协程（每3秒检查一次，独立于指标上报）
+run_command_poller() {
+    set -eu
+    while true; do
+        run_pending_commands
+        sleep 3
+    done
+}
+
+# 核心架构升级：在这里脱离主循环，静默启动常驻网络 Worker + 命令轮询协程
 run_network_worker &
+run_command_poller &
 
 while true; do
     LOOP_START_TIME=$(date +%s)
@@ -558,9 +568,6 @@ EOF
     # 上报上游数据端 (限定 4s 超时控制，主循环绝不严重漂移)
     curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$PAYLOAD" -m 4 --connect-timeout 2 "$WORKER_URL" 2>/dev/null || true
 
-    # 检查是否有待执行的命令
-    run_pending_commands
-    
     # 动态补偿机制：减去指标采集耗时，保证平稳的上报频率
     LOOP_END_TIME=$(date +%s)
     EXEC_DURATION=$((LOOP_END_TIME - LOOP_START_TIME))
